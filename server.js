@@ -1,144 +1,128 @@
 // ============================================================
-// GENIUS TALK - SERVEUR EXPRESS + WEBSOCKET + FCM
+// GENIUS TALK - SERVEUR EXPRESS + WEBSOCKET 
 // ============================================================
 
 import express from "express";
-import { WebSocketServer } from "ws";
 import http from "http";
-import admin from "firebase-admin";
-import fs from "fs";
+import { WebSocketServer } from "ws";
 
-
-// --- Initialisation Firebase via variable Render ---
-const serviceAccount = JSON.parse(process.env.SERVICE_ACCOUNT);
-
-if (serviceAccount.private_key.includes('\\n')) {
-  serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
-}
-
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
-
-// --- Initialisation du serveur Express ---
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-// --- Listes en mémoire ---
-const clients = {}; // { phone: ws }
-const tokens = {};  // { phone: fcmToken }
+// === Chaque utilisateur peut avoir plusieurs connexions ===
+// Exemple : { "0600000000": Set<WebSocket> }
+const clients = {};
 
-// --- Connexion WebSocket ---
+app.use(express.json());
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  next();
+});
+
+// === Routes HTTP simples ===
+app.get("/", (_, res) => res.send("🌐 Serveur Genius Talk opérationnel !"));
+app.get("/users", (_, res) => {
+  const online = Object.entries(clients).map(([phone, sockets]) => ({
+    phone,
+    connections: sockets.size,
+  }));
+  res.json({ connectedUsers: online });
+});
+
+// === Gestion WebSocket ===
 wss.on("connection", (ws) => {
   console.log("🟢 Nouvelle connexion WebSocket");
   let currentPhone = null;
+  ws.isAlive = true;
 
-  ws.on("message", async (message) => {
+  ws.on("pong", () => (ws.isAlive = true));
+
+  ws.on("message", (msg) => {
     try {
-      const data = JSON.parse(message);
-      console.log("📩 Reçu :", data);
+      const data = JSON.parse(msg);
 
-      // 🔹 Enregistrement utilisateur
+      // === Enregistrement d’un utilisateur ===
       if (data.type === "register") {
         if (!data.phone) {
-          ws.send(JSON.stringify({ type: "error", text: "Le numéro de téléphone est requis." }));
+          ws.send(JSON.stringify({ type: "error", text: "Numéro requis." }));
           return;
         }
 
+        if (!clients[data.phone]) clients[data.phone] = new Set();
+        clients[data.phone].add(ws);
         currentPhone = data.phone;
-        clients[currentPhone] = ws;
-        ws.phone = currentPhone;
 
-        console.log(`✅ Utilisateur enregistré : ${currentPhone}`);
-        ws.send(JSON.stringify({ type: "info", text: `Inscription réussie pour ${currentPhone}` }));
+        console.log(`✅ ${currentPhone} connecté (${clients[currentPhone].size} sockets actives)`);
+        ws.send(
+          JSON.stringify({
+            type: "info",
+            text: `Inscription réussie (${currentPhone})`,
+          })
+        );
         return;
       }
 
-      // 🔹 Enregistrement du token FCM
-      if (data.type === "fcm_register") {
-        const { phone, token } = data;
-        if (phone && token) {
-          tokens[phone] = token;
-          console.log(` Token FCM enregistré pour ${phone}`);
-          ws.send(JSON.stringify({ type: "info", text: "Token FCM enregistré avec succès" }));
-        } else {
-          ws.send(JSON.stringify({ type: "error", text: "Champs manquants (phone, token)" }));
-        }
-        return;
-      }
-
-      // 🔹 Envoi de message à un destinataire spécifique
+      // === Envoi d’un message ===
       if (data.type === "message") {
         const { from, to, text } = data;
-
         if (!from || !to || !text) {
-          ws.send(JSON.stringify({ type: "error", text: "Champs manquants (from, to, text)" }));
+          ws.send(JSON.stringify({ type: "error", text: "Champs manquants." }));
           return;
         }
 
-        const recipient = clients[to];
+        const recipients = clients[to];
+        if (!recipients || recipients.size === 0) {
+          ws.send(JSON.stringify({ type: "error", text: `${to} hors ligne.` }));
+          return;
+        }
 
-        if (recipient && recipient.readyState === ws.OPEN) {
-          // Utilisateur connecté → envoi direct WebSocket
-          recipient.send(JSON.stringify({ type: "message", from, text }));
-          ws.send(JSON.stringify({ type: "reply", text: `Message envoyé à ${to}` }));
-        } else {
-          // Utilisateur déconnecté → envoi notification FCM
-          const fcmToken = tokens[to];
-          if (fcmToken) {
-            const payload = {
-              notification: {
-                title: `Message de ${from}`,
-                body: text,
-              },
-            };
-
-            try {
-              await admin.messaging().sendToDevice(fcmToken, payload);
-              console.log(`✅ Notification FCM envoyée à ${to}`);
-              ws.send(JSON.stringify({ type: "reply", text: `Notification envoyée à ${to}` }));
-            } catch (err) {
-              console.error("❌ Erreur lors de l’envoi FCM :", err);
-              ws.send(JSON.stringify({ type: "error", text: "Échec d’envoi FCM" }));
-            }
-          } else {
-            ws.send(JSON.stringify({
-              type: "error",
-              text: `⚠️ ${to} est hors ligne et sans token FCM.`,
-            }));
+        // Envoi à toutes les connexions du destinataire
+        for (const recipient of recipients) {
+          if (recipient.readyState === ws.OPEN) {
+            recipient.send(JSON.stringify({ type: "message", from, text }));
           }
         }
+
+        // Confirmation pour l’expéditeur
+        ws.send(JSON.stringify({ type: "reply", text: `Message envoyé à ${to}` }));
+        console.log(`📤 ${from} → ${to} : ${text}`);
         return;
       }
 
-      // 🔹 Type de message inconnu
+      // === Type inconnu ===
       ws.send(JSON.stringify({ type: "error", text: "Type de message inconnu." }));
-
     } catch (err) {
-      console.error("⚠️ Erreur de traitement :", err);
+      console.error("⚠️ Erreur de parsing JSON :", err.message);
       ws.send(JSON.stringify({ type: "error", text: "Format JSON invalide." }));
     }
   });
 
-  // 🔹 Déconnexion
+  // === Déconnexion ===
   ws.on("close", () => {
     if (currentPhone && clients[currentPhone]) {
-      delete clients[currentPhone];
-      console.log(`🔴 Déconnexion : ${currentPhone}`);
-    } else {
-      console.log("🔴 Connexion WebSocket fermée (non enregistrée)");
+      clients[currentPhone].delete(ws);
+      if (clients[currentPhone].size === 0) delete clients[currentPhone];
+      console.log(`🔴 ${currentPhone} déconnecté (${clients[currentPhone]?.size || 0} restantes)`);
     }
   });
 });
 
-// --- Route simple pour test HTTP ---
-app.get("/", (req, res) => {
-  res.send("🌐 Serveur Genius Talk WebSocket actif et en ligne !");
-});
+// === Vérification périodique de l’état des connexions ===
+setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (!ws.isAlive) return ws.terminate();
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, 30000);
 
-// --- Lancement du serveur ---
+// === Configuration keep-alive pour Render ===
+server.keepAliveTimeout = 120000; // 2 minutes
+server.headersTimeout = 125000;
+
+// === Démarrage du serveur ===
 const PORT = process.env.PORT || 10000;
-server.listen(PORT, () => {
-  console.log(`🌐 Serveur Genius Talk en écoute sur le port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`🚀 Serveur Genius Talk prêt sur le port ${PORT}`));
