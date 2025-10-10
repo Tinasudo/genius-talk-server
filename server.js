@@ -51,57 +51,39 @@ wss.on("connection", (ws) => {
         return;
       }
 
-      //Envoi de message (broadcast automatique)
-      if (data.type === "message") {
-        const { text } = data;
+// Envoi de message à un destinataire spécifique
+if (data.type === "message") {
+  const { from, to, text } = data;
 
-        if (!text) {
-          ws.send(
-            JSON.stringify({
-              type: "error",
-              text: "Message invalide. Le champ 'text' est requis.",
-            })
-          );
-          return;
-        }
+  if (!from || !to || !text) {
+    ws.send(JSON.stringify({
+      type: "error",
+      text: "Champs manquants (from, to, text)",
+    }));
+    return;
+  }
 
-        const connectedUsers = Object.keys(clients).filter(
-          (num) => num !== currentPhone
-        );
+  const recipient = clients[to];
 
-        if (connectedUsers.length === 0) {
-          ws.send(
-            JSON.stringify({
-              type: "error",
-              text: "Aucun autre utilisateur n'est en ligne.",
-            })
-          );
-          return;
-        }
+  if (recipient && recipient.readyState === ws.OPEN) {
+    recipient.send(JSON.stringify({
+      type: "message",
+      from,
+      text,
+    }));
+    ws.send(JSON.stringify({
+      type: "reply",
+      text: `✅ Message envoyé à ${to}`,
+    }));
+  } else {
+    ws.send(JSON.stringify({
+      type: "error",
+      text: `⚠️ Destinataire ${to} non en ligne`,
+    }));
+  }
+  return;
+}
 
-        //Envoi à tous les autres connectés
-        connectedUsers.forEach((num) => {
-          const recipient = clients[num];
-          if (recipient && recipient.readyState === ws.OPEN) {
-            recipient.send(
-              JSON.stringify({
-                type: "message",
-                from: currentPhone,
-                text,
-              })
-            );
-          }
-        });
-
-        // Confirmation à l'expéditeur
-        ws.send(
-          JSON.stringify({
-            type: "reply",
-            text: `Message envoyé à ${connectedUsers.length} utilisateur(s).`,
-          })
-        );
-        return;
-      }
 
       // Message inconnu
       ws.send(
