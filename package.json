@@ -1,0 +1,17 @@
+{
+  "name": "genius-talk-server",
+  "version": "1.0.0",
+  "description": "Serveur WebSocket Genius Talk (Express + ws)",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.1.0",
+    "ws": "^8.18.3"
+  }
+}
